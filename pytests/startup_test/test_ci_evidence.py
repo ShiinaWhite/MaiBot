@@ -3,6 +3,7 @@
 from copy import deepcopy
 
 import json
+import hashlib
 import io
 import os
 import signal
@@ -14,7 +15,13 @@ import pytest
 
 from pytests.startup_test.check_junit import check
 from pytests.startup_test.docker_acceptance import parse_events, validate, validate_init_config
-from pytests.startup_test.prepare_ci_context import RUNTIME_COMMIT, RUNTIME_FILES
+from pytests.startup_test.prepare_ci_context import (
+    CLEAN_PR_HEAD,
+    EVIDENCE_BASE,
+    PR_TEST_FILES,
+    RUNTIME_COMMIT,
+    RUNTIME_FILES,
+)
 from pytests.startup_test.shutdown_fixture import ROOT
 from pytests.startup_test.shutdown_observer import PREFIX
 
@@ -190,10 +197,35 @@ def test_junit_requires_exact_count(tmp_path):
 
 
 def test_runtime_sources_are_unchanged():
-    for name in RUNTIME_FILES:
-        expected = subprocess.check_output(["git", "show", f"{RUNTIME_COMMIT}:{name}"], cwd=ROOT)
+    from pytests.startup_test.prepare_ci_context import IDENTITY
+
+    for name in RUNTIME_FILES + PR_TEST_FILES:
+        expected = subprocess.check_output(["git", "show", f"{CLEAN_PR_HEAD}:{name}"], cwd=ROOT)
         actual = (ROOT / name).read_bytes().replace(b"\r\n", b"\n")
         assert actual == expected
+        assert hashlib.sha256(expected).hexdigest() == IDENTITY["sha256"][name]
+
+
+def test_validated_docker_harness_is_only_relocated():
+    before = subprocess.check_output(
+        ["git", "show", f"{EVIDENCE_BASE}:pytests/startup_test/shutdown_fixture.py"], cwd=ROOT
+    )
+    expected = before.replace(b"pytests.startup_test.shutdown_fixture", b"pytests.startup_test.docker_shutdown_fixture")
+    assert (ROOT / "pytests/startup_test/docker_shutdown_fixture.py").read_bytes().replace(b"\r\n", b"\n") == expected
+    for name in (
+        "pytests/startup_test/docker_acceptance.py",
+        "pytests/startup_test/shutdown_observer.py",
+        "pytests/startup_test/check_junit.py",
+        "pytests/startup_test/storage_isolation.py",
+        "pytests/startup_test/Dockerfile.storage",
+        "pytests/A_memorix_test/test_shutdown_real_storage.py",
+    ):
+        expected = subprocess.check_output(["git", "show", f"{EVIDENCE_BASE}:{name}"], cwd=ROOT)
+        assert (ROOT / name).read_bytes().replace(b"\r\n", b"\n") == expected
+    dockerfile = subprocess.check_output(["git", "show", f"{EVIDENCE_BASE}:pytests/startup_test/Dockerfile"], cwd=ROOT)
+    assert (ROOT / "pytests/startup_test/Dockerfile").read_bytes().replace(b"\r\n", b"\n") == dockerfile.replace(
+        b"pytests.startup_test.shutdown_fixture", b"pytests.startup_test.docker_shutdown_fixture"
+    )
 
 
 def test_real_git_archive_preserves_runtime_bytes_on_this_host():
@@ -211,23 +243,36 @@ def context_git(monkeypatch, changed=(), bad_runtime=None):
     calls = []
     source = {name: ("fixed " + name).encode() for name in RUNTIME_FILES}
     source.update({"locales/en.json": b"{}", "pyproject.toml": b"[project]", "uv.lock": b"version=1"})
-    tests = {"pytests/startup_test/shutdown_fixture.py": b"# tooling"}
-    tests.update({name: b"# storage test" for name in context.STORAGE_TESTS})
+    tests = {name: ("# clean PR " + name).encode() for name in PR_TEST_FILES}
+    for name in context.STORAGE_TESTS:
+        tests.setdefault(name, b"# storage test")
+    monkeypatch.setattr(
+        context,
+        "IDENTITY",
+        {
+            "clean_pr_head": CLEAN_PR_HEAD,
+            "runtime_commit": RUNTIME_COMMIT,
+            "sha256": {
+                name: hashlib.sha256((source | tests)[name]).hexdigest() for name in RUNTIME_FILES + PR_TEST_FILES
+            },
+        },
+    )
 
     def git(*args):
         calls.append(args)
         if args == ("rev-parse", "HEAD"):
             return tooling.encode()
-        if args == ("merge-base", "--is-ancestor", RUNTIME_COMMIT, tooling):
+        if args == ("merge-base", "--is-ancestor", EVIDENCE_BASE, tooling):
             return b""
-        if args == ("diff", "--name-only", RUNTIME_COMMIT, tooling):
+        if args == ("diff", "--name-only", EVIDENCE_BASE, tooling):
             return "\n".join(changed).encode()
         if args[0] == "show":
             ref, path = args[1].split(":", 1)
-            return b"altered runtime" if ref == tooling and path == bad_runtime else source[path]
+            return b"altered source" if ref == tooling and path == bad_runtime else (source | tests)[path]
         if args[0] == "archive":
-            if args[1] == RUNTIME_COMMIT:
-                assert args[2:] == ("--", "bot.py", "src", "locales", "pyproject.toml", "uv.lock")
+            assert args[1] == tooling
+            if args[3] == "bot.py":
+                assert args[2:] == ("--", "bot.py", "src", "locales", "pyproject.toml", "uv.lock", "docker-compose.yml")
                 members = source
             else:
                 assert args == ("archive", tooling, "--", *context.TEST_PREFIXES, *context.STORAGE_TESTS)
@@ -248,16 +293,16 @@ def context_git(monkeypatch, changed=(), bad_runtime=None):
 @pytest.mark.parametrize("path", ["src/change.py", "config/example.toml", "data/example.db", "unrelated.txt"])
 def test_context_rejects_non_test_changes_before_copy(tmp_path, monkeypatch, path):
     context, calls, _ = context_git(monkeypatch, changed=[path])
-    with pytest.raises(AssertionError, match="Not test-only"):
+    with pytest.raises(AssertionError, match="Not validation-only"):
         context.prepare(tmp_path / "context")
     assert not any(call[0] == "archive" for call in calls)
     assert not list((tmp_path / "context").rglob("*"))
 
 
-@pytest.mark.parametrize("path", RUNTIME_FILES)
+@pytest.mark.parametrize("path", RUNTIME_FILES + PR_TEST_FILES)
 def test_context_rejects_changed_runtime_before_copy(tmp_path, monkeypatch, path):
     context, calls, _ = context_git(monkeypatch, bad_runtime=path)
-    with pytest.raises(AssertionError, match="Runtime source changed"):
+    with pytest.raises(AssertionError, match="Clean PR source changed"):
         context.prepare(tmp_path / "context")
     assert not any(call[0] == "archive" for call in calls)
 
@@ -267,6 +312,9 @@ def test_context_contains_only_git_allowlist(tmp_path, monkeypatch):
     destination = tmp_path / "context"
     result = context.prepare(destination)
     assert result["runtime_commit"] == RUNTIME_COMMIT and result["tooling_commit"] == "c" * 40
+    assert result["clean_pr_head"] == CLEAN_PR_HEAD
+    assert set(result["runtime_sha256"]) == set(RUNTIME_FILES)
+    assert set(result["regression_sha256"]) == set(PR_TEST_FILES)
     actual = {p.relative_to(destination).as_posix() for p in destination.rglob("*") if p.is_file()}
     assert actual == set(files) | {"source-provenance.json"}
     assert all((destination / name).read_bytes() == data for name, data in files.items())
@@ -313,7 +361,15 @@ def test_observer_delegates_signals_and_wait_without_counting_kill_as_stop(monke
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_observed_worker_still_executes_real_entrypoint(fail):
-    args = [sys.executable, "-u", "-m", "pytests.startup_test.shutdown_fixture", "--worker", "--observe", "--self-stop"]
+    args = [
+        sys.executable,
+        "-u",
+        "-m",
+        "pytests.startup_test.docker_shutdown_fixture",
+        "--worker",
+        "--observe",
+        "--self-stop",
+    ]
     if fail:
         args.append("--fail")
     result = subprocess.run(

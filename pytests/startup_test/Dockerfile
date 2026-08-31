@@ -6,4 +6,4 @@ COPY bot.py ./bot.py
 COPY src/common/shutdown.py src/common/process_runner.py ./src/common/
 COPY pytests/startup_test/ ./pytests/startup_test/
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-ENTRYPOINT ["python", "-m", "pytests.startup_test.shutdown_fixture"]
+ENTRYPOINT ["python", "-m", "pytests.startup_test.docker_shutdown_fixture"]

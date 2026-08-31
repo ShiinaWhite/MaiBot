@@ -10,10 +10,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ".github/workflows/shutdown-linux.yml"
-BASE = "c62dcdbc0ffd75d46a823d0308f6b967fb4b75a3"
+BASE = "3aecf0f8d082312a12df1757f38a1ed7df8a377a"
 CASES = [
     ("posix", "Require all four real POSIX tests (zero skips)", 4),
     ("storage", "Real Host Kernel lifecycle and temporary storage roundtrip", 6),
+    ("p1", "Require all fifteen P1 handoff regressions (zero skips)", 15),
+    ("regression", "Require remaining graceful shutdown regressions (zero skips)", 27),
 ]
 
 
@@ -45,20 +47,21 @@ def test_report_mount_and_collection_preserve_isolation(kind, name, count):
     assert commands[-1] == ["test", "$test_exit", "-eq", "0"]
 
 
-def test_workflow_delta_is_only_report_transport():
-    """只允许这一轮报告通道替换；触发、权限、六场景和所有门禁保持原样。"""
+def test_workflow_delta_only_adds_exact_clean_pr_regressions():
+    """只增加两组 clean PR 回归；已验证的触发、隔离、六场景与报告门禁逐字不变。"""
     before = subprocess.check_output(["git", "show", f"{BASE}:{WORKFLOW}"], cwd=ROOT).decode("utf-8")
     after = (ROOT / WORKFLOW).read_text(encoding="utf-8")
-    assert after.count('--mount "type=bind,source=$report_dir,target=/reports"') == 2
-    for kind, _, _ in CASES:
-        after = after.replace(
-            f'          report_dir="$(mktemp -d "$RUNNER_TEMP/shutdown-{kind}-reports.XXXXXX")"\n', ""
+    assert after.count('--mount "type=bind,source=$report_dir,target=/reports"') == 4
+    for _, name, _ in CASES[2:]:
+        script = script_for(after, name)
+        if name == CASES[2][1]:
+            assert "-k 'task_handoff or publication_boundaries'" in script
+        else:
+            assert (
+                "-k 'not task_handoff and not publication_boundaries and not test_posix_real_runner_worker_shutdown'"
+                in script
+            )
+        after = re.sub(
+            r"^      - name: " + re.escape(name) + r"\n        run: \|\n(?:          .*\n)+", "", after, flags=re.M
         )
-        after = after.replace(f"--junitxml=/reports/{kind}.xml", f"--junitxml=/tmp/{kind}.xml")
-        container = "shutdown-posix" if kind == "posix" else "shutdown-storage-test"
-        after = after.replace(
-            f'cp "$report_dir/{kind}.xml" evidence/{kind}.xml',
-            f"docker cp {container}:/tmp/{kind}.xml evidence/{kind}.xml",
-        )
-    after = after.replace('            --mount "type=bind,source=$report_dir,target=/reports" \\\n', "")
     assert after == before

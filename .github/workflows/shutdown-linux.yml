@@ -46,6 +46,32 @@ jobs:
           cp "$report_dir/posix.xml" evidence/posix.xml
           python3 -m pytests.startup_test.check_junit evidence/posix.xml 4
           test "$test_exit" -eq 0
+      - name: Require all fifteen P1 handoff regressions (zero skips)
+        run: |
+          set -euo pipefail
+          report_dir="$(mktemp -d "$RUNNER_TEMP/shutdown-p1-reports.XXXXXX")"
+          test_exit=0
+          docker run --name shutdown-p1 --network none --read-only --tmpfs /tmp \
+            --mount "type=bind,source=$report_dir,target=/reports" \
+            --entrypoint python shutdown-fixture -m pytest pytests/startup_test/test_graceful_shutdown.py \
+            -k 'task_handoff or publication_boundaries' -q -p no:cacheprovider \
+            --junitxml=/reports/p1.xml --show-capture=no --tb=short || test_exit=$?
+          cp "$report_dir/p1.xml" evidence/p1.xml
+          python3 -m pytests.startup_test.check_junit evidence/p1.xml 15
+          test "$test_exit" -eq 0
+      - name: Require remaining graceful shutdown regressions (zero skips)
+        run: |
+          set -euo pipefail
+          report_dir="$(mktemp -d "$RUNNER_TEMP/shutdown-regression-reports.XXXXXX")"
+          test_exit=0
+          docker run --name shutdown-regression --network none --read-only --tmpfs /tmp \
+            --mount "type=bind,source=$report_dir,target=/reports" \
+            --entrypoint python shutdown-fixture -m pytest pytests/startup_test/test_graceful_shutdown.py \
+            -k 'not task_handoff and not publication_boundaries and not test_posix_real_runner_worker_shutdown' \
+            -q -p no:cacheprovider --junitxml=/reports/regression.xml --show-capture=no --tb=short || test_exit=$?
+          cp "$report_dir/regression.xml" evidence/regression.xml
+          python3 -m pytests.startup_test.check_junit evidence/regression.xml 27
+          test "$test_exit" -eq 0
       - name: Docker stop - both topologies, failure and real 60s timeout
         run: python3 -m pytests.startup_test.docker_acceptance --image shutdown-fixture --output evidence/docker
       - name: Build temporary storage test image (no publish)

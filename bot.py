@@ -56,9 +56,23 @@ def _mark_shutdown_and_interrupt(_signum: int, _frame: object) -> None:
 def _cancel_active_main_task_from_signal() -> None:
     """在事件循环线程中取消当前主任务。"""
 
-    if _shutdown_task is not None or _active_main_task is None or _active_main_task.done():
+    if (
+        _shutdown_task is not None
+        or _active_main_task is None
+        or _active_main_task.done()
+        or _active_main_task.cancelling()
+    ):
         return
     _active_main_task.cancel()
+
+
+def _set_active_main_task(task: asyncio.Task[None]) -> None:
+    """先发布任务，再消费停止标记；交接前的请求和交接后的回调都不会丢失。"""
+    global _active_main_task
+    _active_main_task = task
+    if _shutdown_signal_count:
+        request_shutdown("signal")
+        _cancel_active_main_task_from_signal()
 
 
 def _install_early_worker_signal_handlers() -> None:
@@ -533,13 +547,10 @@ if __name__ == "__main__":
         try:
             # 执行初始化和任务调度
             initialize_task = loop.create_task(main_system.initialize())
-            _active_main_task = initialize_task
-            if _shutdown_signal_count:
-                request_shutdown("signal_during_startup")
-                initialize_task.cancel()
+            _set_active_main_task(initialize_task)
             _run_until_complete(loop, initialize_task)
             main_tasks = loop.create_task(main_system.schedule_tasks())
-            _active_main_task = main_tasks
+            _set_active_main_task(main_tasks)
             _run_until_complete(loop, main_tasks)
 
         except KeyboardInterrupt:

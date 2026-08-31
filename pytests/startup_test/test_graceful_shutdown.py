@@ -386,3 +386,82 @@ def test_posix_real_runner_worker_shutdown(fail, early):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "shutdown_at", ["init_pending", "init_return", "after_init", "before_publish", "after_publish", "scheduled"]
+)
+@pytest.mark.parametrize("repeated", [False, True])
+def test_worker_consumes_shutdown_across_task_handoff(shutdown_at, repeated):
+    args = [
+        sys.executable,
+        "-u",
+        "-m",
+        "pytests.startup_test.shutdown_fixture",
+        "--worker",
+        f"--shutdown-at={shutdown_at}",
+    ]
+    if repeated:
+        args.append("--repeated")
+    result = subprocess.run(
+        args,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        env=os.environ | {"PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.splitlines()
+    scheduler_started = shutdown_at in {"after_publish", "scheduled"}
+    assert ("schedule_entered" in lines) is scheduler_started
+    assert ("schedule_cancelled" in lines) is scheduler_started
+    if scheduler_started:
+        assert lines.index("schedule_cancelled") < lines.index("startup.shutdown_started")
+    assert lines.count("startup.shutdown_started") == lines.count("memory_stop") == 1
+    assert lines.count("startup.shutdown_completed") == 1
+    assert lines.index("memory_stop") < lines.index("metadata_close") < lines.index("startup.shutdown_completed")
+
+
+@pytest.mark.parametrize("point", ["before_publish", "after_publish", "after_check"])
+def test_signal_on_publication_boundaries_cancels_once(bot, point):
+    ns, system, events = bot()
+    loop = asyncio.new_event_loop()
+    ns["_active_main_loop"] = loop
+    publish = ns["_set_active_main_task"]
+    triggered = False
+
+    def stop():
+        nonlocal triggered
+        triggered = True
+        ns["_mark_shutdown_and_interrupt"](signal.SIGTERM, None)
+
+    def trace(frame, event, arg):
+        # 精确在赋值后/条件求值后注入；执行原函数，不复制其发布逻辑。
+        if frame.f_code is publish.__code__ and not triggered:
+            if point == "after_publish" and event == "line" and ns["_active_main_task"] is task:
+                stop()
+            elif point == "after_check" and event == "return":
+                stop()
+        return trace
+
+    async def scheduler():
+        await asyncio.Event().wait()
+
+    previous_trace = sys.gettrace()
+    task = loop.create_task(scheduler())
+    try:
+        if point == "before_publish":
+            stop()
+        sys.settrace(trace)
+        publish(task)
+        sys.settrace(previous_trace)
+        with pytest.raises(asyncio.CancelledError):
+            ns["_run_until_complete"](loop, task)
+        assert triggered and task.cancelling() == 1
+        assert ns["_run_graceful_shutdown"](loop, system)
+        assert events.count("memory_stop") == 1
+    finally:
+        sys.settrace(previous_trace)
+        loop.close()

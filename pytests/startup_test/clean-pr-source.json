@@ -1,0 +1,15 @@
+{
+  "clean_pr_head": "48e0db4ca879cc551ccfd396b0b869c2347e8838",
+  "runtime_commit": "d5e93c90bb49b8bba10c403d8516ff294055cbe2",
+  "sha256": {
+    "bot.py": "5c93beecc73ad901f4214457514bc54551021bd7005470fba1bad5a1b5fdec1a",
+    "src/common/process_runner.py": "a9d2edfcdb9a885f289c63a8ade34fa2dc73f3110f7bcb06afb1d3534f3aaf35",
+    "src/common/shutdown.py": "63cc0f6e74fcaa7c4734a0b4be976eebf7345d7d5afcf88edd2d2b47c32d2719",
+    "docker-compose.yml": "858d2568448e51add7a927223d38a7e89e9b4577cbccabce277690568b965e89",
+    "pytests/startup_test/shutdown_fixture.py": "0aed2caec59331841cf1f2348f512dfc12d141b14ce6439d8ae188f88ee7f5ef",
+    "pytests/startup_test/test_graceful_shutdown.py": "836864dc002a03e7629e20043edc93831acc299b4b5be57b9030f74738954d5f",
+    "pytests/startup_test/memory_shutdown_fixture.py": "8181f346297da5bcdb59f873f136e861fdc13860940177ad7807a26c67075ff3",
+    "pytests/startup_test/README.md": "d0ad463e7677dad6a3fbfc9bd2e200e5fae02fa7a43f5c1da858f6b35c969af4",
+    "pytests/A_memorix_test/test_host_shutdown_failure_propagation.py": "8e0e206e6b6ede482b933f6456567f46b2c990e33a9d2e9bf9844599ede7615b"
+  }
+}

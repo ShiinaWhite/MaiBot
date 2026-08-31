@@ -1,16 +1,40 @@
 """真实 Host → Kernel 生命周期；存储替身仅记录调用或抛出故障。"""
 
+from pathlib import Path
+
 import asyncio
+import os
+import subprocess
+import sys
 
 import pytest
 
-from src.A_memorix.host_service import AMemorixHostService
-from src.A_memorix.core.runtime.sdk_memory_kernel import SDKMemoryKernel
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "persist", "metadata_close"])
-async def test_host_awaits_kernel_and_propagates_storage_failure(tmp_path, monkeypatch, failure):
+def test_host_awaits_kernel_and_propagates_storage_failure(tmp_path, failure):
+    # 新解释器隔离模块缓存；不污染常规 pytest 会话，也不导入宿主配置/业务数据库。
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytests.A_memorix_test.test_host_shutdown_failure_propagation",
+            str(tmp_path),
+            failure or "normal",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        env=os.environ | {"PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def check_host_shutdown(tmp_path, monkeypatch, failure):
+    from src.A_memorix.host_service import AMemorixHostService
+    from src.A_memorix.core.runtime.sdk_memory_kernel import SDKMemoryKernel
+
     events = []
     kernel = SDKMemoryKernel(plugin_root=tmp_path, config={"storage": {"data_dir": str(tmp_path / "memory")}})
     kernel._runtime_writer_lock.acquire()
@@ -52,3 +76,10 @@ async def test_host_awaits_kernel_and_propagates_storage_failure(tmp_path, monke
         assert not kernel._initialized
     finally:
         kernel._runtime_writer_lock.release()
+
+
+if __name__ == "__main__":
+    from pytests.startup_test.memory_shutdown_fixture import isolated
+
+    with isolated() as patch:
+        asyncio.run(check_host_shutdown(Path(sys.argv[1]), patch, None if sys.argv[2] == "normal" else sys.argv[2]))
