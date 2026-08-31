@@ -36,12 +36,14 @@ jobs:
       - name: Require all four real POSIX tests (zero skips)
         run: |
           set -euo pipefail
+          report_dir="$(mktemp -d "$RUNNER_TEMP/shutdown-posix-reports.XXXXXX")"
           test_exit=0
           docker run --name shutdown-posix --network none --read-only --tmpfs /tmp \
+            --mount "type=bind,source=$report_dir,target=/reports" \
             --entrypoint python shutdown-fixture -m pytest pytests/startup_test/test_graceful_shutdown.py \
             -k test_posix_real_runner_worker_shutdown -q -p no:cacheprovider \
-            --junitxml=/tmp/posix.xml --show-capture=no --tb=short || test_exit=$?
-          docker cp shutdown-posix:/tmp/posix.xml evidence/posix.xml
+            --junitxml=/reports/posix.xml --show-capture=no --tb=short || test_exit=$?
+          cp "$report_dir/posix.xml" evidence/posix.xml
           python3 -m pytests.startup_test.check_junit evidence/posix.xml 4
           test "$test_exit" -eq 0
       - name: Docker stop - both topologies, failure and real 60s timeout
@@ -54,10 +56,12 @@ jobs:
       - name: Real Host Kernel lifecycle and temporary storage roundtrip
         run: |
           set -euo pipefail
+          report_dir="$(mktemp -d "$RUNNER_TEMP/shutdown-storage-reports.XXXXXX")"
           test_exit=0
           docker run --name shutdown-storage-test --network none --read-only --tmpfs /tmp \
-            shutdown-storage -q -p no:cacheprovider --junitxml=/tmp/storage.xml --show-capture=no --tb=short || test_exit=$?
-          docker cp shutdown-storage-test:/tmp/storage.xml evidence/storage.xml
+            --mount "type=bind,source=$report_dir,target=/reports" \
+            shutdown-storage -q -p no:cacheprovider --junitxml=/reports/storage.xml --show-capture=no --tb=short || test_exit=$?
+          cp "$report_dir/storage.xml" evidence/storage.xml
           python3 -m pytests.startup_test.check_junit evidence/storage.xml 6
           test "$test_exit" -eq 0
       - name: Preserve allowlisted evidence even on failure

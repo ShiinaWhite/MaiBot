@@ -38,6 +38,13 @@ secrets。构建阶段需要公开镜像/依赖下载，所有测试容器均 `-
 系统及临时 `/tmp`，不挂 Docker socket、不发布端口。Docker CLI 只在隔离 runner 上运行。
 Artifacts 只保留环境版本、源码身份、固定字段合成事件和测试结果，7 天过期。
 
+JUnit 与业务临时数据分离：POSIX/storage 各自用 `mktemp -d` 在 `$RUNNER_TEMP`
+创建独立报告目录，仅将该空目录 bind mount 到 `/reports`。pytest 将 XML 写到
+`/reports/posix.xml` 或 `/reports/storage.xml`，退出后由 runner 从宿主目录复制到
+`evidence/` 并执行原有严格校验；不再从已卸载的 `/tmp` tmpfs 提取报告。
+业务数据仍在 `/tmp` tmpfs，根文件系统仍只读，报告挂载不包含配置、数据或凭据。
+临时报告目录随一次性 runner 回收；不使用持久 Docker volume。
+
 验收分三层，不能相互冒充：
 
 1. **真实 Linux/Docker 信号链**：AST 提取的实际 Worker 入口、真实 Runner 和 Uvicorn
