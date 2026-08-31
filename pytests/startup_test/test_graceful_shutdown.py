@@ -302,7 +302,7 @@ def test_real_worker_entrypoint_exit_semantics(fail, restart, code):
         timeout=10,
     )
     assert result.returncode == code, result.stdout + result.stderr
-    assert result.stdout.count("memory_stop") == 1
+    assert result.stdout.splitlines().count("memory_stop") == 1
     assert ("startup.shutdown_completed" in result.stdout) is (not fail)
     assert ("metadata_close" in result.stdout) is (not fail)
 
@@ -328,7 +328,7 @@ def test_real_worker_consumes_stop_received_during_startup():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "worker_booting" in result.stdout
     assert "initialize" not in result.stdout
-    assert result.stdout.count("memory_stop") == 1
+    assert result.stdout.splitlines().count("memory_stop") == 1
     assert "startup.shutdown_completed" in result.stdout
 
 
@@ -379,7 +379,7 @@ def test_posix_real_runner_worker_shutdown(fail, early):
         while not lines.empty():
             output.append(lines.get_nowait())
         text = "".join(output)
-        assert text.count("memory_stop") == 1
+        assert text.splitlines().count("memory_stop") == 1
         assert ("startup.shutdown_completed" in text) is (not fail)
         assert "runner_exit=" + str(1 if fail else 0) in text
     finally:

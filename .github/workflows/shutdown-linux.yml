@@ -1,0 +1,70 @@
+name: Shutdown Linux Isolation
+
+on:
+  push:
+    branches: [fix/graceful-docker-shutdown]
+
+permissions:
+  contents: read
+
+jobs:
+  shutdown:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record environment and prepare exact source
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          uname -a > evidence/kernel.txt
+          docker version > evidence/docker-version.txt
+          docker info --format '{{.OSType}}/{{.Architecture}}' > evidence/docker-platform.txt
+          python3 -m pytests.startup_test.prepare_ci_context "$RUNNER_TEMP/shutdown-context" > evidence/source.json
+      - name: Build dedicated fixture image (no publish)
+        run: |
+          docker build --platform linux/amd64 -f "$RUNNER_TEMP/shutdown-context/pytests/startup_test/Dockerfile" \
+            -t shutdown-fixture "$RUNNER_TEMP/shutdown-context"
+          docker image inspect shutdown-fixture --format '{{.Id}} {{.Os}}/{{.Architecture}}' > evidence/fixture-image.txt
+      - name: Require all four real POSIX tests (zero skips)
+        run: |
+          set -euo pipefail
+          test_exit=0
+          docker run --name shutdown-posix --network none --read-only --tmpfs /tmp \
+            --entrypoint python shutdown-fixture -m pytest pytests/startup_test/test_graceful_shutdown.py \
+            -k test_posix_real_runner_worker_shutdown -q -p no:cacheprovider \
+            --junitxml=/tmp/posix.xml --show-capture=no --tb=short || test_exit=$?
+          docker cp shutdown-posix:/tmp/posix.xml evidence/posix.xml
+          python3 -m pytests.startup_test.check_junit evidence/posix.xml 4
+          test "$test_exit" -eq 0
+      - name: Docker stop - both topologies, failure and real 60s timeout
+        run: python3 -m pytests.startup_test.docker_acceptance --image shutdown-fixture --output evidence/docker
+      - name: Build temporary storage test image (no publish)
+        run: |
+          docker build --platform linux/amd64 -f "$RUNNER_TEMP/shutdown-context/pytests/startup_test/Dockerfile.storage" \
+            -t shutdown-storage "$RUNNER_TEMP/shutdown-context"
+          docker image inspect shutdown-storage --format '{{.Id}} {{.Os}}/{{.Architecture}}' > evidence/storage-image.txt
+      - name: Real Host Kernel lifecycle and temporary storage roundtrip
+        run: |
+          set -euo pipefail
+          test_exit=0
+          docker run --name shutdown-storage-test --network none --read-only --tmpfs /tmp \
+            shutdown-storage -q -p no:cacheprovider --junitxml=/tmp/storage.xml --show-capture=no --tb=short || test_exit=$?
+          docker cp shutdown-storage-test:/tmp/storage.xml evidence/storage.xml
+          python3 -m pytests.startup_test.check_junit evidence/storage.xml 6
+          test "$test_exit" -eq 0
+      - name: Preserve allowlisted evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: shutdown-isolation-${{ github.sha }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error

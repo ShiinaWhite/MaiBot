@@ -1,6 +1,7 @@
 """隔离加载真实 bot 生命周期函数，不导入配置、模型、数据库或网络客户端。"""
 
 from pathlib import Path
+from contextlib import nullcontext
 from types import ModuleType, SimpleNamespace
 from typing import TypeVar
 
@@ -37,8 +38,9 @@ def load_bot_functions(events, *, memory_failure=False, memory_delay=0, install_
         events.append("memory_stop")
         await asyncio.sleep(memory_delay)
         if memory_failure:
+            events.append("memory_failure")
             raise RuntimeError("fixture persist failed")
-        events.extend(["persist", "metadata_close", "writer_lock_release"])
+        events.extend(["persist", "metadata_close", "writer_lock_release", "memory_stop_completed"])
 
     modules = {
         "src.config.config": {"config_manager": SimpleNamespace(stop_file_watcher=record("watcher_stop"))},
@@ -94,20 +96,37 @@ def load_bot_functions(events, *, memory_failure=False, memory_delay=0, install_
     return namespace, system, tree
 
 
-def run_fixture_worker(fail=False, self_stop=False, restart=False, early_stop=False):
+def run_fixture_worker(fail=False, self_stop=False, restart=False, early_stop=False, observe=False, ignore_stop=False):
     """供 POSIX 子进程测试使用；执行真实 Worker __main__，业务服务均为 fake。"""
 
     class Events(list):
         def append(self, value):
             super().append(value)
             print(value, flush=True)
+            if observe and value in {
+                "startup.shutdown_started",
+                "startup.shutdown_completed",
+                "memory_stop",
+                "memory_failure",
+                "persist",
+                "metadata_close",
+                "writer_lock_release",
+                "memory_stop_completed",
+            }:
+                from pytests.startup_test.shutdown_observer import emit
+
+                emit(value)
 
         def extend(self, values):
             for value in values:
                 self.append(value)
 
     events = Events()
-    ns, system, tree = load_bot_functions(events, memory_failure=fail, memory_delay=0.2)
+    ns, system, tree = load_bot_functions(events, memory_failure=fail, memory_delay=3.0 if observe else 0.2)
+    if observe:
+        from pytests.startup_test.shutdown_observer import emit, worker_exit, worker_handler
+
+        ns["_mark_shutdown_and_interrupt"] = worker_handler(ns["_mark_shutdown_and_interrupt"])
     if early_stop:
         ns["_install_early_worker_signal_handlers"]()
         print("worker_booting", flush=True)
@@ -126,7 +145,12 @@ def run_fixture_worker(fail=False, self_stop=False, restart=False, early_stop=Fa
 
         class TestServer(Server):
             async def _serve(self, sockets=None):
+                if ignore_stop:
+                    # 仅故障注入，Runner 的真实 60 秒截止值完全不变。
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 print("worker_ready", flush=True)
+                if observe:
+                    emit("worker_ready", ignores_stop=ignore_stop)
                 if self_stop:
                     asyncio.get_running_loop().call_soon(signal.raise_signal, signal.SIGTERM)
                 await asyncio.Event().wait()
@@ -142,7 +166,7 @@ def run_fixture_worker(fail=False, self_stop=False, restart=False, early_stop=Fa
         {
             "__name__": "__main__",
             "raw_main": lambda: system,
-            "os": os,
+            "os": SimpleNamespace(**{**vars(os), "_exit": worker_exit}) if observe else os,
             "loop": None,
             "set_main_loop": lambda loop: None,
             "shutdown_logging": lambda: None,
@@ -157,19 +181,31 @@ def run_fixture_worker(fail=False, self_stop=False, restart=False, early_stop=Fa
 if __name__ == "__main__":
     if "--worker" in sys.argv:
         run_fixture_worker(
-            "--fail" in sys.argv, "--self-stop" in sys.argv, "--restart" in sys.argv, "--early-stop" in sys.argv
+            "--fail" in sys.argv,
+            "--self-stop" in sys.argv,
+            "--restart" in sys.argv,
+            "--early-stop" in sys.argv,
+            "--observe" in sys.argv,
+            "--ignore-stop" in sys.argv,
         )
     else:
-        from src.common.process_runner import supervise_worker
+        from src.common.process_runner import WORKER_SHUTDOWN_TIMEOUT, supervise_worker
+        from pytests.startup_test.shutdown_observer import emit, observe_runner
         import logging
 
         logging.basicConfig(level=logging.INFO)
-        code = supervise_worker(
-            [sys.executable, "-m", "pytests.startup_test.shutdown_fixture", "--worker"]
-            + (["--fail"] if "--fail" in sys.argv else [])
-            + (["--early-stop"] if "--early-stop" in sys.argv else []),
-            os.environ.copy(),
-            logging.getLogger("fixture"),
-        )
+        observing = "--observe" in sys.argv
+        if observing:
+            assert WORKER_SHUTDOWN_TIMEOUT == 60.0
+            emit("runner_started")
+        with observe_runner() if observing else nullcontext():
+            code = supervise_worker(
+                [sys.executable, "-m", "pytests.startup_test.shutdown_fixture", "--worker"]
+                + [flag for flag in ("--fail", "--early-stop", "--observe", "--ignore-stop") if flag in sys.argv],
+                os.environ.copy(),
+                logging.getLogger("fixture"),
+            )
+        if observing:
+            emit("runner_exit", code=code)
         print("runner_exit=" + str(code), flush=True)
         raise SystemExit(code)

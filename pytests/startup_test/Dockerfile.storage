@@ -1,0 +1,11 @@
+# 独立存储验收：只有固定源码和测试；不复制运行配置/数据。
+FROM python:3.13-slim
+WORKDIR /test
+RUN python -m pip install --no-cache-dir uv==0.11.8
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --group dev --no-install-project
+COPY src ./src
+COPY pytests/startup_test ./pytests/startup_test
+COPY pytests/A_memorix_test ./pytests/A_memorix_test
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+ENTRYPOINT ["/test/.venv/bin/python", "-m", "pytests.startup_test.storage_isolation", "-p", "pytest_asyncio.plugin"]
