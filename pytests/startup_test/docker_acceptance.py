@@ -53,6 +53,12 @@ def one(events: list[dict], name: str) -> dict:
     return matches[0]
 
 
+def validate_init_config(host_config: dict, init: bool) -> None:
+    # 缺省/null 没有明确的配置证据；最终仍须通过 validate() 的真实进程树断言。
+    configured_init = host_config.get("Init")
+    assert configured_init is None or configured_init is init, "Explicit Init conflicts with scenario"
+
+
 def validate(
     events: list[dict],
     *,
@@ -206,7 +212,8 @@ def run_case(image: str, scenario: str, init: bool, output: Path) -> dict:
         topology = snapshot(name, runner["pid"], worker["pid"])
         assert topology["alive"]
         info = json.loads(docker("inspect", name))[0]
-        assert bool(info["HostConfig"]["Init"]) == init and info["HostConfig"]["NetworkMode"] == "none"
+        validate_init_config(info["HostConfig"], init)
+        assert info["HostConfig"]["NetworkMode"] == "none"
         assert all(m["Type"] == "tmpfs" and m["Destination"] == "/tmp" for m in info["Mounts"])
         assert not info["HostConfig"]["PortBindings"] and not info["HostConfig"].get("Binds")
         assert info["Config"].get("StopSignal", "SIGTERM") in ("", "SIGTERM", "15")

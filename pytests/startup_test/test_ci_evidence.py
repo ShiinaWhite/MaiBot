@@ -13,7 +13,7 @@ import tarfile
 import pytest
 
 from pytests.startup_test.check_junit import check
-from pytests.startup_test.docker_acceptance import parse_events, validate
+from pytests.startup_test.docker_acceptance import parse_events, validate, validate_init_config
 from pytests.startup_test.prepare_ci_context import RUNTIME_COMMIT, RUNTIME_FILES
 from pytests.startup_test.shutdown_fixture import ROOT
 from pytests.startup_test.shutdown_observer import PREFIX
@@ -74,6 +74,46 @@ def trace(scenario="normal", init=False):
 def test_expected_trace_is_accepted(scenario, init):
     events, args = trace(scenario, init)
     assert validate(events, **args)["exit_code"] == args["state"]["ExitCode"]
+
+
+@pytest.mark.parametrize("init", [False, True], ids=["pid1", "docker-init"])
+@pytest.mark.parametrize(
+    "host_config", [{}, {"Init": None}, {"Init": False}, {"Init": True}], ids=["missing", "null", "false", "true"]
+)
+def test_init_config_accepts_unspecified_or_matching_value(host_config, init):
+    configured_init = host_config.get("Init")
+    if configured_init is not None and configured_init is not init:
+        with pytest.raises(AssertionError, match="Explicit Init conflicts"):
+            validate_init_config(host_config, init)
+    else:
+        validate_init_config(host_config, init)
+        events, args = trace(init=init)
+        assert validate(events, **args)["init"] is init
+
+
+@pytest.mark.parametrize("init", [False, True], ids=["pid1", "docker-init"])
+@pytest.mark.parametrize("config_kind", ["missing", "null", "matching"])
+@pytest.mark.parametrize("fault", ["opposite_topology", "runner_parent", "worker_parent"])
+def test_init_config_never_replaces_real_process_tree(init, config_kind, fault):
+    host_config = {} if config_kind == "missing" else {"Init": None if config_kind == "null" else init}
+    validate_init_config(host_config, init)
+    events, args = trace(init=not init if fault == "opposite_topology" else init)
+    args["init"] = init
+    if fault == "runner_parent":
+        args["topology"]["runner_ppid"] = 99
+    elif fault == "worker_parent":
+        args["topology"]["worker_ppid"] = 99
+    with pytest.raises(AssertionError):
+        validate(events, **args)
+
+
+@pytest.mark.parametrize("host_config", [{}, {"Init": None}, {"Init": True}], ids=["missing", "null", "true"])
+def test_init_scenario_requires_actual_docker_init(host_config):
+    validate_init_config(host_config, True)
+    events, args = trace(init=True)
+    args["topology"]["pid1_comm"] = "python"
+    with pytest.raises(AssertionError):
+        validate(events, **args)
 
 
 @pytest.mark.parametrize(
